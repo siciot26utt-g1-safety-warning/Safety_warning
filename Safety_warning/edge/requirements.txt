@@ -1,2 +1,0 @@
-opencv-python>=4.8.0
-paho-mqtt>=2.0.0
