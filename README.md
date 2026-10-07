@@ -42,8 +42,7 @@ Hệ thống được thiết kế theo mô hình **Edge-Cloud Hybrid IoT**, t�
 │  - Camera IP / USB Webcam                                               │
 │  - Inference Engine: YOLOv8n (PPE & Person Detection)                   │
 │  - Zone Inspector: Polygon ROI Intersection Check                       │
-│  - Persistence Filter: Khử báo giả (>= 3 frames vi phạm)               │
-│  - GPIO Actuator: LED Strobe (Pin 17) -> Buzzer Bip-Bip (Pin 27)        │
+│  - Persistence Filter: Khử báo giả (>= 3 frames vi phạm)                │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │ (MQTT Pub: safety/edge/{id}/alert)
                                      ▼
