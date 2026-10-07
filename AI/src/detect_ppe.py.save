@@ -1,0 +1,484 @@
+
+import time
+from collections import deque
+MODEL_PATH = "../models/best_640.onnx"MODEL_PATH = "../models/best_640.onnxfrom ultralytics import YOLO
+
+
+# =========================================================
+# CẤU HÌNH MODEL
+# =========================================================
+
+MODEL_PATH = "../models/best_640.onnx"
+
+PERSON_CLASS = 0
+HELMET_CLASS = 1
+VEST_CLASS = 2
+
+PERSON_CONF = 0.25
+HELMET_CONF = 0.25
+VEST_CONF = 0.15
+
+# Để thấp hơn VEST_CONF để YOLO không loại áo sớm
+YOLO_CONF = 0.10
+
+IMGSZ = 640
+
+
+# =========================================================
+# GHÉP VEST VỚI PERSON
+# =========================================================
+
+PERSON_MARGIN = 0.10
+MIN_VEST_OVERLAP = 0.50
+
+
+# =========================================================
+# TEMPORAL SMOOTHING
+# =========================================================
+
+VEST_HISTORY_SIZE = 10
+VEST_OK_MIN_FRAMES = 6
+
+vest_history = deque(maxlen=VEST_HISTORY_SIZE)
+
+
+# =========================================================
+# BOX FUNCTIONS
+# =========================================================
+
+def expand_box(box, margin=0.10):
+    x1, y1, x2, y2 = box
+
+    w = x2 - x1
+    h = y2 - y1
+
+    return (
+        x1 - w * margin,
+        y1 - h * margin,
+        x2 + w * margin,
+        y2 + h * margin
+    )
+
+
+def box_center(box):
+    x1, y1, x2, y2 = box
+
+    return (
+        (x1 + x2) / 2,
+        (y1 + y2) / 2
+    )
+
+
+def overlap_ratio(person_box, vest_box):
+    px1, py1, px2, py2 = person_box
+    vx1, vy1, vx2, vy2 = vest_box
+
+    ix1 = max(px1, vx1)
+    iy1 = max(py1, vy1)
+    ix2 = min(px2, vx2)
+    iy2 = min(py2, vy2)
+
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+
+    intersection = iw * ih
+
+    vest_area = max(
+        1,
+        (vx2 - vx1) * (vy2 - vy1)
+    )
+
+    return intersection / vest_area
+
+
+def vest_belongs_to_person(person_box, vest_box):
+    expanded = expand_box(
+        person_box,
+        PERSON_MARGIN
+    )
+
+    px1, py1, px2, py2 = expanded
+
+    cx, cy = box_center(vest_box)
+
+    center_inside = (
+        px1 <= cx <= px2
+        and py1 <= cy <= py2
+    )
+
+    overlap = overlap_ratio(
+        person_box,
+        vest_box
+    )
+
+    return (
+        center_inside
+        or overlap >= MIN_VEST_OVERLAP
+    )
+
+
+def match_vests(person_boxes, vest_boxes):
+    person_has_vest = [
+        False for _ in person_boxes
+    ]
+
+    for vest_box in vest_boxes:
+
+        best_person = None
+        best_score = -1
+
+        for i, person_box in enumerate(person_boxes):
+
+            if not vest_belongs_to_person(
+                person_box,
+                vest_box
+            ):
+                continue
+
+            overlap = overlap_ratio(
+                person_box,
+                vest_box
+            )
+
+            pcx, pcy = box_center(person_box)
+            vcx, vcy = box_center(vest_box)
+
+            distance = (
+                (pcx - vcx) ** 2
+                + (pcy - vcy) ** 2
+            ) ** 0.5
+
+            score = overlap - distance * 0.0001
+
+            if score > best_score:
+                best_score = score
+                best_person = i
+
+        if best_person is not None:
+            person_has_vest[best_person] = True
+
+    return person_has_vest
+
+
+# =========================================================
+# DRAW
+# =========================================================
+
+def draw_box(frame, box, label, conf=None):
+    x1, y1, x2, y2 = map(int, box)
+
+    cv2.rectangle(
+        frame,
+        (x1, y1),
+        (x2, y2),
+        (255, 255, 255),
+        2
+    )
+
+    text = label
+
+    if conf is not None:
+        text += f" {conf:.2f}"
+
+    cv2.putText(
+        frame,
+        text,
+        (x1, max(20, y1 - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2
+    )
+
+
+# =========================================================
+# LOAD MODEL
+# =========================================================
+
+print("Loading model...")
+
+model = YOLO(MODEL_PATH)
+
+print("Model loaded.")
+
+
+# =========================================================
+# USB CAMERA
+# =========================================================
+
+cap = cv2.VideoCapture(0)
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FPS, 30)
+
+if not cap.isOpened():
+    print("Khong mo duoc camera USB")
+    raise SystemExit
+
+print("Camera USB da mo thanh cong")
+
+
+# =========================================================
+# MAIN LOOP
+# =========================================================
+
+prev_time = time.time()
+
+while True:
+
+    ret, frame = cap.read()
+
+    if not ret:
+        print("Khong doc duoc frame")
+        break
+
+
+    # -----------------------------------------------------
+    # YOLO
+    # -----------------------------------------------------
+
+    results = model.predict(
+        source=frame,
+        imgsz=IMGSZ,
+        conf=YOLO_CONF,
+        verbose=False
+    )
+
+    result = results[0]
+
+    person_boxes = []
+    helmet_boxes = []
+    vest_boxes = []
+
+    person_data = []
+    helmet_data = []
+    vest_data = []
+
+
+    # -----------------------------------------------------
+    # FILTER CLASS + CONF
+    # -----------------------------------------------------
+
+    for box in result.boxes:
+
+        cls_id = int(box.cls[0])
+        conf = float(box.conf[0])
+
+        x1, y1, x2, y2 = map(
+            float,
+            box.xyxy[0]
+        )
+
+        bbox = (
+            x1,
+            y1,
+            x2,
+            y2
+        )
+
+        if cls_id == PERSON_CLASS:
+
+            if conf >= PERSON_CONF:
+                person_boxes.append(bbox)
+                person_data.append(
+                    (bbox, conf)
+                )
+
+        elif cls_id == HELMET_CLASS:
+
+            if conf >= HELMET_CONF:
+                helmet_boxes.append(bbox)
+                helmet_data.append(
+                    (bbox, conf)
+                )
+
+        elif cls_id == VEST_CLASS:
+
+            if conf >= VEST_CONF:
+                vest_boxes.append(bbox)
+                vest_data.append(
+                    (bbox, conf)
+                )
+
+
+    # -----------------------------------------------------
+    # MATCH VEST TO PERSON
+    # -----------------------------------------------------
+
+    person_has_vest = match_vests(
+        person_boxes,
+        vest_boxes
+    )
+
+
+    # -----------------------------------------------------
+    # TEMPORAL SMOOTHING
+    # -----------------------------------------------------
+
+    if len(person_boxes) > 0:
+
+        frame_vest_ok = all(
+            person_has_vest
+        )
+
+        vest_history.append(
+            1 if frame_vest_ok else 0
+        )
+
+        if len(vest_history) < VEST_HISTORY_SIZE:
+
+            vest_status = "CHECKING"
+
+        else:
+
+            good_frames = sum(
+                vest_history
+            )
+
+            if good_frames >= VEST_OK_MIN_FRAMES:
+
+                vest_status = "VEST_OK"
+
+            else:
+
+                vest_status = "NO_VEST"
+
+    else:
+
+        vest_history.clear()
+        vest_status = "NO_PERSON"
+
+
+    # -----------------------------------------------------
+    # DRAW PERSON
+    # -----------------------------------------------------
+
+    for i, (bbox, conf) in enumerate(person_data):
+
+        if i < len(person_has_vest):
+
+            if person_has_vest[i]:
+                label = "person + vest"
+            else:
+                label = "person"
+
+        else:
+            label = "person"
+
+        draw_box(
+            frame,
+            bbox,
+            label,
+            conf
+        )
+
+
+    # -----------------------------------------------------
+    # DRAW HELMET
+    # -----------------------------------------------------
+
+    for bbox, conf in helmet_data:
+
+        draw_box(
+            frame,
+            bbox,
+            "yellow_helmet",
+            conf
+        )
+
+
+    # -----------------------------------------------------
+    # DRAW VEST
+    # -----------------------------------------------------
+
+    for bbox, conf in vest_data:
+
+        draw_box(
+            frame,
+            bbox,
+            "yellow_vest",
+            conf
+        )
+
+
+    # -----------------------------------------------------
+    # STATUS
+    # -----------------------------------------------------
+
+    cv2.putText(
+        frame,
+        f"VEST: {vest_status}",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (255, 255, 255),
+        2
+    )
+
+
+    # -----------------------------------------------------
+    # FPS
+    # -----------------------------------------------------
+
+    now = time.time()
+
+    dt = now - prev_time
+
+    prev_time = now
+
+    fps = 1 / dt if dt > 0 else 0
+
+    cv2.putText(
+        frame,
+        f"FPS: {fps:.1f}",
+        (20, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2
+    )
+
+
+    # -----------------------------------------------------
+    # ALERT
+    # -----------------------------------------------------
+
+    if vest_status == "NO_VEST":
+
+        cv2.putText(
+            frame,
+            "WARNING: NO_VEST",
+            (20, 130),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (255, 255, 255),
+            3
+        )
+
+        print("WARNING: NO_VEST")
+
+
+    # -----------------------------------------------------
+    # SHOW WINDOW
+    # -----------------------------------------------------
+
+    cv2.imshow(
+        "PPE Detection",
+        frame
+    )
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q"):
+        break
+
+
+# =========================================================
+# CLEANUP
+# =========================================================
+
+cap.release()
+cv2.destroyAllWindows()
+
+print("Stopped.")

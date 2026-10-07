@@ -23,6 +23,7 @@ Ví dụ:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 import threading
@@ -213,12 +214,12 @@ class Publisher:
             return "NO_PPE"
         return None
 
-    def alert(self, worker_id, status, helmet, vest, info, snapshot=None):
-        """Chỉ publish khi status của worker này khác lần trước."""
+    def alert(self, worker_id, status, helmet, vest, info, snapshot=None, image_base64=None):
         if not self.ok or self._last_status.get(worker_id) == status:
             return
         self._last_status[worker_id] = status
-
+        if status != "VIOLATION":
+            return 
         payload = {
             "device_id": self.device_id,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -230,6 +231,7 @@ class Publisher:
             "violation_count": info["violation_count"],
             "violation_duration": round(info["violation_duration"], 1),
             "image_snapshot": snapshot,
+            "image_base64": image_base64,       # <--- Thêm dòng này
         }
         self.client.publish(
             self.ALERT.format(dev=self.device_id), json.dumps(payload), qos=1)
@@ -480,18 +482,25 @@ def main():
                 changed = last_status.get(worker_id) != status
                 last_status[worker_id] = status
 
+                draw(frame, person["bbox"], worker_id,
+                     has_helmet, has_vest, status, info)
+
                 snapshot = None
-                if changed and status == "VIOLATION" and args.save_snapshots:
+                image_base64 = None
+                if changed and status == "VIOLATION":
                     snapshot = (f"snapshot_{args.device_id}_"
                                 f"{datetime.now():%Y%m%d_%H%M%S}_w{worker_id}.jpg")
-                    cv2.imwrite(str(SNAPSHOT_DIR / snapshot), frame)
+                    if args.save_snapshots:
+                        cv2.imwrite(str(SNAPSHOT_DIR / snapshot), frame)
+
+                    # Nén ảnh có viền đỏ gửi qua MQTT về Dashboard
+                    ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    if ret:
+                        image_base64 = base64.b64encode(buf).decode("utf-8")
 
                 if pub and changed:
                     pub.alert(worker_id, status, has_helmet, has_vest,
-                              info, snapshot)
-
-                draw(frame, person["bbox"], worker_id,
-                     has_helmet, has_vest, status, info)
+                              info, snapshot, image_base64)
 
             counted += 1
             if time.time() - t_fps >= 1.0:
