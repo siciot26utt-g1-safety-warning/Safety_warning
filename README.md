@@ -158,10 +158,6 @@ cd edge
 pip install -r requirements.txt
 python camera_stream.py
 ```
-* Sơ đồ nối dây GPIO trên Pi 5:
-  * **Đèn Strobe LED**: Chân `GPIO 17` (Pin 11)
-  * **Còi Buzzer**: Chân `GPIO 27` (Pin 13)
-  * **GND**: Pin 6 / Pin 9
 
 ---
 
